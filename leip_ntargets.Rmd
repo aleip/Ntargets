@@ -1,0 +1,943 @@
+---
+title: "Calculation of N targets"
+output:
+  html_document:
+    df_print: paged
+---
+
+This is the code to calculate possible ways of reaching N pollution reduction targets for the report of the [Expert Panel on Nitrogen and Food (EPNF)](http://www.clrtap-tfrn.org/content/epnf).
+
+The quantification is mainly based on the following EPNF papers:
+
+- Hutchings et al. (2020) Measures to increase the nitrogen use efficiency of European agricultural production. [Glob. Food Sec. 26, 100381](https://doi.org/10.1016/j.gfs.2020.100381).
+- Corrado et al. (2020) Unveiling the potential for an efficient use of nitrogen along the food supply and consumption chain. [Glob. Food Sec. 25, 100368](https://doi.org/10.1016/j.gfs.2020.100368).
+
+
+```{r libraries, eval=TRUE, echo=FALSE}
+require(data.table)
+require(openxlsx)
+require(ggplot2)
+```
+
+
+
+```{r definitions, eval=TRUE, echo=FALSE}
+
+me <- Sys.info()[6]
+pc <- Sys.info()[4]
+
+me <- 'adria'
+fol.me <- paste0("C:/Users/", me, "/")
+fol.google <- paste0(fol.me, "google/")
+fol.github <- paste0("")
+fol.cextr <- paste0(fol.me, "rprojects/capriextract/")
+fol.manuscripts <- paste0(fol.google, "literature/manuscript/")
+
+fol.curpap <- paste0(fol.manuscripts, "leip_nitrogentargets/")
+fol.res <- paste0(fol.curpap, "results/")
+
+source(paste0(fol.cextr, "f_tools.r"))
+```
+
+
+# Input data
+## Supply nitrogen use efficiencies
+
+
+```{r loaddata, eval=TRUE, echo=TRUE}
+
+# Input data collected in file:
+fil.input <- paste0(fol.curpap, "reachingtargets_inputdata.xlsx")
+fil.input
+
+# Providing shares of regional distribution (north/south) for 
+# different food supply groups from agricultural production
+input.regshares <- as.data.table(read.xlsx(xlsxFile = fil.input, sheet = "supply", skipEmptyRows = TRUE, check.names = TRUE))
+input.regshares <- input.regshares[! grepl("^[#]", system)][! is.na(region)]
+input.regshares
+
+# NUEs from various agricultural and non-agricultural food supply systems
+# - Agricultural systems from Hutchings et al. (2020) and differentiated
+#   by ruminant-meat (constrained/unconstrained), granivore meat, 
+#   dairy, arable; regions: north/south
+# - Note: constrained and unconstrained means the land use is either constrained by soil conditions or slope (so will be continuous grassland) or unconstrained (so could be used for grassland or arable cropping)
+
+input.NUEsup <- as.data.table(read.xlsx(fil.input, sheet = "NUE"))
+
+input.NUEsup <- rbind(input.NUEsup, 
+# - Controlled environment agriculture: landless (or: soilless) food 
+#   production in controlles systems. High energy demand but virtually
+#   no nutrient losses
+                      list("ceag", "all", "all", 1.0),
+# - Fish: only wild catch, assumption no new virtual N in excess of what 
+#   is consumed
+                      list("fish", "all", "all", 1.0),
+# - Seafood: here the N-fitering species are meant, 
+#   i.e. bivalves and algae. They 'clean' up thus have infinite NUE
+
+                      list("seaf", "all", "all", Inf)
+                      )
+# Assumptions for other foods
+# 
+input.NUEsup <- rbind(
+  input.NUEsup,
+
+  # - Analogues of animal products: as long as energy emissions are ignored
+  #   They are the sum of their inputs (= crops)
+  # - Cellular agriculture: idem
+  input.NUEsup[system=="agri", .(system="anal", region="all", ambition, NUEsupply)],
+  input.NUEsup[system=="agri", .(system="cell", region="all", ambition, NUEsupply)],
+  
+  # - Insects: high conversion rate --> like dairy and eggs and aquaculture ???
+  input.NUEsup[system=="dair", .(system="eggs", region, ambition, NUEsupply)],
+  input.NUEsup[system=="dair", .(system="aqua", region="all", ambition, NUEsupply)],
+  input.NUEsup[system=="dair", .(system="inse", region="all", ambition, NUEsupply)]
+)
+
+# Calculate mean NUE for those where no regional share is available
+input.NUEsup <- unique(input.NUEsup[, NUEsupply := mean(NUEsupply), by=.(system, region, ambition)])
+
+#
+#
+input.NUEsup
+
+
+```
+
+## Food waste shares
+
+### Default food waste shares
+
+```{r foodwastecorrado, eval=TRUE, echo=TRUE}
+
+# Food waste shares from Corrado et al. (2020)
+
+corrado.supply <- 1679 + 850 + 978 + 3680
+
+# Total food residues estimated, including flow back to animal feed and fertilizers
+fr.proc.ktN_y <- 1679 + 850 + 978
+
+# Share of food residues pathways relative to total food residues generation in 
+# food processing
+
+input.foodres <- data.table(matrix(nrow = 0, ncol = 3)) 
+names(input.foodres) <- c("source", "destination", "share")
+
+# These shares are from the file 
+# 19_11_25_Nitrogen calculation+sludges - IK chapter Nitrogen.xlsx
+# and are given for the food groups 
+# Meat 	Fish 	Dairy&eggs 	Cereals 	Fruit, vegetables&potatoes	Sugarbeet&oilcrops
+# Here only the 'total' shares are used, but refinement possible
+# 
+# Share of sludge and compost used in agriculture. 
+input.foodres <- rbind(input.foodres, 
+# See Corrado et al. (2020)
+# File corrado2020.19_11_25_Nitrogen calculation+sludges - IK chapter Nitrogen.xlsx
+# Sheet Data_sources_2, Range B64:K69
+#       Calculated from Eurostat data (env_wastrt), extracted April 2019
+                        list("slud", "fert", 0.53),
+# See Corrado et al. (2020)
+# File corrado2020.19_11_25_Nitrogen calculation+sludges - IK chapter Nitrogen.xlsx
+# Sheet Data_sources_2, Range C10:M10
+#       Data are emissions of Nr (23.5%) and N2 (1.9%) from compost.
+#       It is assumed that the difference goes to agriculture
+                        list("comp", "fert", 1-0.235-0.019))
+
+input.foodres <- rbind(
+  input.foodres, 
+  list("proc", "total", fr.proc.ktN_y/corrado.supply),
+  list("proc", "feed", 1679/fr.proc.ktN_y),
+  list ("proc", "bioref", 978/fr.proc.ktN_y),
+  
+  # This includes direct fertilizer application and composting (163)
+  #                     rounded up 
+  list("proc", "fert", 70/fr.proc.ktN_y),  # Anerobic digestion and direct application
+  list("proc", "comp", (234 + 163)/fr.proc.ktN_y), #Composting + anaerobic digestion with composting 
+  list("proc", "wwt0", 2/fr.proc.ktN_y),
+  list("proc", "wwt1", 2/fr.proc.ktN_y),
+  list("proc", "wwt2", 20/fr.proc.ktN_y),
+  list("proc", "wwt3", 60/fr.proc.ktN_y),
+  
+  # Combining land use + incineration 
+  # --> Those fractions are considered as lost from the system
+  #     and are directly affecting NUE
+  list("proc", "land", 130.4/fr.proc.ktN_y),
+  list("proc", "inci", 168.3/fr.proc.ktN_y),
+  
+  # Food losses from distribution                        
+  list("dist", "total", 97.8/3680),
+  list("dist", "fert", 8.9/97.8),
+  list("dist", "comp", 50.7/97.8),
+  list("dist", "land", 16.7/97.8),
+  list("dist", "inci", 21.5/97.8),
+  
+  # Consumption in food services
+  list("serv", "total", 120/689),
+  list("serv", "fert", (3+10.4)/120),
+  list("serv", "comp", (34.8+24.3)/120),
+  list("serv", "wwt0", 0.1/120),
+  list("serv", "wwt1", 0.1/120),
+  list("serv", "wwt2", 0.7/120),
+  list("serv", "wwt3", 2.1/120),
+  list("serv", "land", 19.4/120),
+  list("serv", "inci", 25.1/120),
+  
+  # Consumption in households
+  list("hhld", "total", 484.1/2408.9),
+  list("hhld", "fert", (46.1+16.4)/484.1),
+  list("hhld", "comp", (54.8+38.4)/484.1),
+  list("hhld", "wwt0", 1.1/484.1),
+  list("hhld", "wwt1", 1.1/484.1),
+  list("hhld", "wwt2", 11.1/484.1),
+  list("hhld", "wwt3", 32.8/484.1),
+  list("hhld", "land", 136.6/484.1),
+  list("hhld", "inci", 145.6/484.1),
+  
+  # Add fate of compost, and wwts --> share that goes to fertilizer
+  # The rest goes to landfill/emissions (not differntiated currently)
+  list("wwt0", "sludge", 0.00),
+  list("wwt1", "sludge", 0.17),
+  list("wwt2", "sludge", 0.18),
+  list("wwt3", "sludge", 0.19)
+  
+)
+input.foodres[destination!="total", sum(share), by=.(source)][]
+input.foodres
+```
+
+
+### Calculation of food loss/waste scenarios.
+Based on Corrado et al. (2020).
+File 19_11_25_Nitrogen calculation+sludges - IK chapter Nitrogen.xlsx
+Sheet 'Scenarios'
+
+- **Processing**. On the basis of Eurostat data. Assuming recovery= 2/3 composting, 1/3 anaerobic digestion 
+  - 5% food waste generation (sent to animal feed), -50% landfill, -50% incineration, waste equally divertedto composting and anaerobic digestion 
+  - 10% food waste generation (sent to animal feed), 0% landfill, -80% incineration, waste equally diverted to composting and anaerobic digestion 
+
+- **Distribution**. On the basis of Eurostat data. Assuming recovery= 2/3 composting, 1/3 anaerobic digestion 
+  - 25% food waste generation (prevented), -50% landfill, -50% incineration, waste equally diverted to composting and anaerobic digestion 
+  - 50% food waste generation (prevented), 0% landfill, -80% incineration, waste equally diverted to composting and anaerobic digestion 
+
+- **Households**. On the basis of Eurostat data. Assuming recovery= 2/3 composting, 1/3 anaerobic digestion 
+  - 25% food waste generation (prevented), -50% landfill, -50% incineration, waste equally diverted to composting and anaerobic digestion 
+  - 50% food waste generation (prevented), 0% landfill, -80% incineration, waste equally diverted to composting and anaerobic digestion 
+
+- **Food services**. On the basis of Eurostat data. Assuming recovery= 2/3 composting, 1/3 anaerobic digestion 
+  - 25% food waste generation (prevented), -50% landfill, -50% incineration, waste equally diverted to composting and anaerobic digestion 
+  - 50% food waste generation (prevented), 0% landfill, -80% incineration, waste eqaully diverted to composting and anaerobic digestion 
+
+
+```{r fooresscnarios, eval=TRUE, echo=TRUE}
+foodres.scenarios <- copy(input.foodres)
+foodres.scenarios$amb <- "Baseline"
+foodres.scenarios <- rbind(foodres.scenarios, 
+                        foodres.scenarios[, .(source, destination, share, amb= "Improved")], 
+                        foodres.scenarios[, .(source, destination, share, amb= "Imprplus")])
+
+# Reduce all total foodres.scenarios by 25%/50% except processing
+foodres.scenarios[source!="proc" & destination=="total" & amb=="Improved", share := share * 0.75]
+foodres.scenarios[source!="proc" & destination=="total" & amb=="Imprplus", share := share * 0.50]
+
+# Reduce all shares sent to landfill by 50%/100% 
+foodres.scenarios[destination == "land" & amb=="Improved", share := share * 0.5]
+foodres.scenarios[destination == "land" & amb=="Imprplus", share := share * 0.0]
+
+# Reduce all shares sent to incineration by 50%/80% 
+foodres.scenarios[destination == "inci" & amb=="Improved", share := share * 0.5]
+foodres.scenarios[destination == "inci" & amb=="Imprplus", share := share * 0.2]
+
+# Distribute foodres equaly over comp and fert
+foodres.scenarios[destination != 'total', gap := 1-sum(share), by=.(source, amb)]
+foodres.scenarios[destination %in% c("fert", "comp"), fertcomp := share/sum(share), by=.(source, amb)]
+foodres.scenarios[destination %in% c("fert", "comp") & ! source %in% c("slud", "comp"), 
+               share := share + fertcomp * gap]
+
+# Increase Use of sewage sludge used in agriculture
+foodres.scenarios[source=="slud" & destination=="fert" & amb=="Improved", share := 0.58]
+foodres.scenarios[source=="slud" & destination=="fert" & amb=="Imprplus", share := 0.63]
+
+# Reduction of Nr emissions from compost (N2 emissions assumed to be constant)
+# See sheet Data_sources_2, Range H10:J10
+# Nr emissions 23.5% --> 21.2% --> 18.6%
+foodres.scenarios[source=="comp" & destination=="fert" & amb=="Improved", share := 1-0.212-0.019]
+foodres.scenarios[source=="comp" & destination=="fert" & amb=="Imprplus", share := 1-0.186-0.019]
+
+foodres.scenarios <- foodres.scenarios[, .(amb, source, destination, share)]
+foodres.ambs <- unique(foodres.scenarios$amb)
+
+```
+
+
+## Demand scenarios
+
+We consider three angle points to change the demand
+
+1. Reduction of overconsumption (energy)
+2. Reduction of overconsumption (proteins)
+3. Shift in protein source
+
+
+### EN: Reduction of energy overconsumption
+According to Verma van den Boos (2020), energy overconsumption in the EU28 is 50% (3443 kcal/cap/day versus 2156 kcal/cap/day as calculated from bodymetric data). Accordingly, a reduction of `r round(100 * (1-2156/3443), 1)`% is possible.
+
+We define a medium and a high ambition scenario of reducing energy overconsumption by 1/3 or 2/3, respectively, corresponding to a reduction of overall energy consumption of 12.5% and 25%, respectively.
+
+Main target for demand food policies indeed is energy overconsumption, and the focus is on the reduction of sugary beverages and food rich in salt, fat, added sugar. We assume therefore that most of the reduction of overconsuption is achieved in the vegetable sector (80%) and only a smaller part in the animal sector (20%).
+
+### PR: Reduction of protein overconsumption
+According to Corrado et al. (2020) there is a protein consumption (intake) of 101 g prot/cap/day. Corresponding to an annual N intake of 2978 kN N consumed per year in the EU28 (population ca 500 millions in 2011, Eurostat). 
+We calculate protein reduction scenarios achieving 40% and 80% reduction of the overconsumption, corresponding to a reduction of 20% and 40% of protein intake, respectively.
+We assume protein reduction to be achieved solely over animal source food. The PR scenarios do not assume a shift in the composition of the food products.
+
+
+## DS: Dietary shift
+A third layer of demand-side reduction is the shift of the diet from products with higher footprints - products with lower footprints. Generally, this will be driven by non-nitrogen environmental concerns, however, there is large correlation between GHG and N footprints.
+
+We define two dietary shift scenarios:
+
+- Demiterian (ds==1): As vegan, but only with half reduction of meat
+
+- Vegetarian (ds==2): Substitution of meat with other dairy, eggs, and vegetable products (50%). However, there is co-production of meat/milk and meat/eggs which is assumed to be consumed.
+
+- Vegan (ds==3): Substitution of meat and other animal source foods with substitutes, including insects and 'seafood' (= filtering species such as bivalves and seaweed). There is no reliable prediction of what share those substitutes could get, so the assumptions have to be taken as preliminary:
+  - Crops: 50%
+  - Plant-based analogues: 30%
+  - Cellular food: 5% 
+  - Seafood: 10%
+  - Insects: 5%
+
+```{r runscenarios, eval=TRUE, echo=TRUE}
+
+# Define vectors for scenarions for Energy reduction (reden), Protein reduction (redpr), Dietary shift (ds)
+vreden <- 0:2
+vredpr <- 0:2
+vds <- 0:3
+
+# Reduction of Energy in steps of 12.5%
+redensteps <- 12.5/100
+# Reducction of Protein in steps of 20%
+redprsteps <- 20/100
+# dietary shift: 0 = default; 1=demiterian; 2=vegetarian; 3=vegan
+
+
+runscens <- data.table(expand.grid(vreden, vredpr, vds))
+names(runscens) <- c("reden", "redpr", "ds")
+
+
+# Dietary shift codes
+dscodes <- data.table(
+  ds = c(0:3),
+  desc = c("Default", "Demiterian", "Vegetarian", "Vegan")
+)
+
+```
+
+
+```{r demand, eval=TRUE, echo=TRUE}
+
+
+input.demand <- as.data.table(read.xlsx(xlsxFile = fil.input, sheet = "Nintake", rows = 1:6, cols = 1:3))
+totNintake <- sum(input.demand$Nintake_ktN)
+totNanim <- sum(input.demand[food != "vege"]$Nintake_ktN)
+
+input.intkshares <- data.table(matrix(nrow = 0, ncol = 3))
+names(input.intkshares) <- c("of", "versus", "value")
+
+
+# Open excel to save results of function fill_intakeshares per scenario
+wbfis <- createWorkbook(creator = "Adrian Leip", title = "EPNF-Nflowmodel", subject = "Output data")
+rdfis <- paste0(fol.res, "allscenarios_by_step~", today(), ".rdata")
+rdfisc <- paste0(fol.res, "tmp/", "allscenarios_by_step~", today(), ".rdata")
+
+# All shares expressed in N units
+input.intkshares <- rbind(
+  input.intkshares, 
+  list("vege", "food", input.demand[food=="vege"]$Nintake_ktN/totNintake),
+  list("meat", "anim", input.demand[food=="meat"]$Nintake_ktN/totNanim),
+  list("dair", "anim", input.demand[food=="dair"]$Nintake_ktN/totNanim),
+  list("eggs", "anim", input.demand[food=="eggs"]$Nintake_ktN/totNanim),
+  list("fish", "anim", input.demand[food=="fish"]$Nintake_ktN/totNanim),
+  # Data source: Agricultural outlook 2005-2030 (2019)
+  # Taken from background data file Baseline_tables_2019_workshop_final to speakers.xlsx
+  # Shares are average 'consumption' of sheep&goat+beef (rumi) and poultry+pig (gran)
+  # over the years 2005-2020
+  list("gran", "meat", 0.213),
+  list("rumi", "meat", 0.787)
+)
+
+rumishares <- function(){
+  
+  ## 
+  ## Example calculation of the share of proteins in meat from dairy herds
+  ## as compared to the proteins in milk + dairy products
+  ## This is unlikely to be of help for determining the share unconstrained vs constrained
+  ## as the meat from dairy herds seems to be too little.
+  ## 
+  milkprot <- 0.034
+  beefprot <- 0.25
+  milkyield <- 16 * 365 # 19.8 kg/day in EU-CRF for 2018
+  beefyield <- 610.77 * 0.8 / 5 # Liveweight as in kg in EU-CRF for 2018
+  
+  protmilk <- milkprot * milkyield
+  protbeef <- beefprot * beefyield
+  
+  shareprot <- protbeef / protmilk
+  
+}
+
+fill_intakeshares <- function(itk.oo, reden=0, redpr=0, DS=0){
+  
+  # Checking given itk.o and fill gaps
+  
+  # Called from function
+  #        intakemodel <- function(intksh = input.intkshares, EN=0, PR=0, DS=0){
+  
+  
+  # FoodN = anim + vege
+  # FoodN = meat + dair + eggsN 
+  itk.o <- copy(itk.oo)
+  
+  # Reduction of energy intake
+  itk.o[of=='vege', value := (value - 0.8 * reden)/(1-reden)]
+  itk.o[of=='anim', value := (value - 0.2 * reden)/(1-reden)]
+  
+  # Reduction of protein overconsumption
+  itk.o[of=='vege', value := (value - 0.0 * redpr)/(1-redpr)]
+  itk.o[of=='anim', value := (value - 1.0 * redpr)/(1-redpr)]
+   
+  # Dietary shift
+  if(DS==2){
+    
+    # Vegetarian diet: shift meat to crops, eggs and dairy
+    
+    ## Residual meat consumption linked to the co-production 
+    meatsh <- itk.o[of=='meat']$value
+    redanim <- 0.5 * (1 - itk.o[of=='vege']$value) * itk.o[of=='meat']$value
+   
+    itk.o[of=='vege', value := value + redanim]
+    
+    meatrumi <- 0.1 * itk.o[of=='dair']$value
+    meatgran <- 0.1 * itk.o[of=='eggs']$value
+    sumanim <- sum(itk.o[! of %in% c("meat") & versus == 'anim']$value)
+    itk.o[! of %in% c("meat") & versus == 'anim', value := value * (1-meatrumi-meatgran)/sumanim]
+
+    itk.o <- rbind(
+      #Remove elements as if they are not existing they won't be updated
+      #But if they are existing they would be duplicated.
+      itk.o[! of %in% c("meat", "gran", "rumi", "anim") ], 
+      list("meat", "anim", meatgran+meatrumi),
+      list("gran", "meat", meatgran/(meatgran+meatrumi)),
+      list("rumi", "meat", meatrumi/(meatgran+meatrumi))
+      )
+    
+    
+  }
+  
+  if(DS == 3 | DS == 1){
+    
+    # Vegan diet
+    #- Crops: 50%
+    #- Plant-based analogues: 30%
+    #- Cellular food: 5% 
+    #- Seafood: 10%
+    #- Insects: 5%
+    
+    
+    if (DS == 3) { vegan <- TRUE }
+    if (DS == 1) { vegan <- FALSE} # Halving animal products
+    
+    sharesubst <- 0.5
+    sharecrops <- 1 - sharesubst
+    if("anim" %in% itk.o$of){
+      redanim <- sharecrops * itk.o[of=='anim']$value
+      if( ! vegan) { 
+        redanim <- redanim / 2; 
+        itk.o[of=='anim', value:= 0.5 * value]
+      }
+    }else{
+      animoriginal <- (1 - itk.o[of=='vege']$value)
+      redanim <- sharecrops * animoriginal
+      if( ! vegan) { 
+        redanim <- redanim / 2; 
+        itk.o <- rbind(
+          itk.o, 
+          list("anim", "food", 0.5 * animoriginal))
+      }
+    }    
+    itk.o[of=='vege', value := value + redanim]
+    itk.o <- rbind(
+      itk.o, 
+      list("cell", "subs", 0.10),
+      list("inse", "subs", 0.10),
+      list("seaf", "subs", 0.20),
+      list("anal", "subs", 0.60)
+      )
+    
+  }
+  
+  itk.o.full <- data.table(matrix(nrow = 0, ncol = 4))
+
+  # Determines system of food products used in this code
+  # Highest aggregation --> level == 0; higher levels represent finer granularity
+  # Default values have two entries: 
+  #    NA if this must be determined. 
+  #       Missing values for 'NA' values are filled at equal shares
+  #    0  if this is not present in default distribution
+  names(itk.o.full) <- c("versus", "of", "level", "default")
+  itk.o.full <- rbind(
+    itk.o.full,
+    list("food", "anim", 0, NA),
+    list("food", "vege", 0, NA),
+    list("food", "subs", 0, 0),
+    
+    # Animal source food: meat, dairy, eggs, aqua, fish 
+    list("anim", "meat", 1, NA),
+    list("anim", "dair", 1, NA),
+    list("anim", "eggs", 1, NA),
+    list("anim", "aqua", 1, NA),  # Aquaculture
+    list("anim", "fish", 1, NA),  # Wild catch
+    
+    # Substitutes for conventional animal source foods: 
+    # cellular agriculture, insects, seafood, analogues
+    list("subs", "cell", 1, 0),
+    list("subs", "inse", 1, 0),
+    list("subs", "seaf", 1, NA),
+    list("subs", "anal", 1, 0),
+    
+    # Vegetable food: from agriculture (on land) or controlled environment
+    list("vege", "agri", 1, NA),
+    list("vege", "ceag", 1, 0),
+    
+    list("meat", "rumi", 2, NA),
+    list("meat", "gran", 2, NA),
+    
+    list("rumi", "const", 3, NA),
+    list("rumi", "uncon", 3, NA)
+  )
+  
+  if(DS == 3 | DS == 1){
+    
+    itk.o.full[of=='anim', default := 0]
+    itk.o.full[of=='subs', default := NA]
+    
+  }
+  
+  # Check on missing shares and fill-up
+  #  ---> If no default is given, shares are distributed equally
+  #  ---> If default == 0 then no share is allocated
+  
+  itk <- merge(itk.o.full, itk.o, by= c("versus", "of"), all.x=TRUE)  
+  
+  # ---> Determine how much of share needs to be distributed
+  itk[, `:=` (tot = 1-sum(value, na.rm = TRUE)), by=.(versus, level)]
+  
+  # ---> Determine over how many elements to distribute
+  itk[is.na(value) & is.na(default), `:=` (N = .N), by=.(versus, level)]
+  
+  # ---> Divide tot by number of elements-tobefilled
+  itk[is.na(default) & is.na(value), value := tot/N]
+  itk[is.na(value), value := 0]
+
+  itk <- itk[, .SD, .SDcols = c(names(itk.o), "level")][order(level)]
+  
+  wsname <- paste0(reden, "-", redpr, "-", DS)
+  flname <- paste0(fol.res, "fill_intakeshares_", "~", today(), ".xlsx")
+  if(file.exists(flname)) {wsnames <- getSheetNames(file = flname)}else{wsnames <- ""}
+  if(! wsname %in% wsnames){
+    ws <- addWorksheet(wbfis, sheetName = wsname)
+    wd <- writeData(wbfis, sheet = wsname, itk, colNames = TRUE, borders = "all")
+    wbfiss <- saveWorkbook(wbfis, file=flname, overwrite = TRUE)
+  }
+  save(file=paste0(fol.res, "tmp/fill_intakeshares_", wsname, ".rdata"), list = objects())
+  return(itk)
+}
+
+allintakeshares <- Reduce(rbind, lapply(1:nrow(runscens), function(x){
+ 
+  reden <- runscens$reden[x] * redensteps
+  redpr <- runscens$redpr[x] * redprsteps
+  ds <- runscens$ds[x]
+  iii <- fill_intakeshares(itk.oo = input.intkshares, reden = reden, redpr = redpr, DS = ds)[]
+  iii$reden <- reden; iii$redpr <- redpr; iii$ds <- ds
+  return(iii)
+   
+}))
+defintakeshares <- allintakeshares[reden==0 & redpr==0 & ds==0]
+allintakeshares[reden==0 & redpr==0 & ds==0]
+
+```
+
+
+
+## Build N-flow model
+```{r intakemodel, echo=TRUE, eval=TRUE}
+
+
+intakemodel <- function(intake.new=defintakeshares){
+  
+  # Assuming that most reduction is in 'empty' calories with no or little proteins
+  # We already assume a share of 80% vegetal food and 20% animal food.
+  # The share of protpercal is hence a bit higher --> 40%
+  protpercal <- 0.4
+  
+  nflow.1 <- copy(intake.new)
+  nflow.1 <- nflow.1[, 1:4]
+  setnames(nflow.1, "value", "share")
+  
+  curreden <- unique(intake.new$reden)
+  curredpr <- unique(intake.new$redpr)
+  
+  nflow.1[level==0, `:=` (source = "hhld", destination = "intake")]
+  nflow.1[level==0 & curredpr==0, value := share * totNintake * (1 - protpercal*curreden)]
+  nflow.1[level==0 & curredpr!=0, value := share * totNintake * (1 - curredpr)]
+  
+  buildintake <- function(dto, lev){
+    
+    
+    dt <- copy(dto)
+    dtr <- dt[level!=lev]
+    
+    ## Associate the element of which is a share
+    ## and calculate the kcal intake [col value]
+    ## and copy the value to col [share]
+    l1 <- merge(dt[level==lev, .(versus, of, share, level, source, destination)], 
+                unique(merge(dt[level==lev, .(versus)], 
+                             dt[level==lev-1, .(of, value)], 
+                             by.x="versus", by.y="of")), by="versus")
+    l1[, `:=` (source = "hhld", destination = "intake", value = share * value)]
+    l1[level==lev, `:=` (source = "hhld", destination = "intake", 
+                         share = value)]
+    dt <- rbind(dtr, l1)[order(level, versus)]
+    return(dt)
+  }
+  x0 <- nflow.1[level==0, share := value] 
+  x1 <- buildintake(x0, lev = 1)
+  x2 <- buildintake(x1, lev = 2)
+  x3 <- buildintake(x2, lev = 3)
+  x3[, source:="tot"]
+  
+  return(x3)
+}
+```
+```{r allintakes, eval=TRUE, echo=TRUE}
+allintakes <- Reduce(rbind, lapply(1:nrow(unique(allintakeshares[, .(reden, redpr, ds)])), function(x){
+  
+  ais <- unique(allintakeshares[, .(reden, redpr, ds)])
+  y <- ais$reden[x]; z <- ais$redpr[x]; w <- ais$ds[x]
+  absintake <- intakemodel(intake.new = allintakeshares[reden==y & redpr==z & ds==w])
+  absintake$reden <- y; absintake$redpr <- z; absintake$ds <- w
+  return(absintake)
+  
+}))
+save(allintakeshares, allintakes, file=rdfis)
+file.copy(rdfis, gsub(".rdata", "_intakes.rdata", rdfisc))
+intake.new <- allintakes[reden==0 & redpr==0 & ds==0]
+intake.new
+```
+
+```{r adddest, eval=TRUE, echo=TRUE}
+# Adding other destinations
+
+calcresshares <- function(nflow.o, nsour, foodres){
+  
+  nflow.4a <- copy(nflow.o)
+  
+  # ---> Total flow proc --> totres
+  nflow.4b <- merge(nflow.4a[, .(source, of, versus, level, value)],
+                    foodres[source==nsour & destination=="total"], 
+                    by="source")
+  nflow.4b <- nflow.4b[, value := value * share / (1-share)][, .(of, versus, level, share, source=nsour, destination="totres", value)]
+  
+  # In case of multiple non-res destinations, sum-up here
+  nflow.4b[, value := sum(value), by=.(of, versus, level, source, destination)]
+  nflow.4b <- unique(nflow.4b)
+  
+  # # --> Merge with residues shares in distribution
+  # #     Multiply the total flow from supp --> proc 
+  # #     with residues shares
+  nflow.4c <- merge(nflow.4b[, .(source, of, versus, level, value)], 
+                    foodres[source==nsour & destination != "total"], 
+                    by="source", allow.cartesian = TRUE)
+  nflow.4c[, value := value * share] 
+  save(nflow.4a, nflow.4b, nflow.4c, file="nflow.rdata")
+  nflow.4d <- rbind(nflow.4a, nflow.4b, nflow.4c)[order(level, of)]
+  
+  return(nflow.4d)
+}
+```
+
+```{r fci_calctotintake, eval=TRUE, echo=TRUE}
+fci_calctotintake <- function(fci_intk, 
+                              fci_fressh = foodres.scenarios[amb=="Baseline"]){
+  
+  # ---> make sure that the columns don't include the 'amb' column
+  foodres <- fci_fressh[, .(source, destination, share)]
+  
+  #Corrado et al. 2020: sankey (see file reachingtargets_inputdata.xlsx)
+  #Nitrogen entering consumption in households 	2893
+  #Nitrogen entering consumption in food services 	689
+  nflow.tot.intake <- copy(fci_intk)
+  nflow.tot.intake <- nflow.tot.intake[, 1:7]
+  nflow.hhld.intake <- copy(nflow.tot.intake)[, `:=` (source="hhld", value = value * 2893 / (689 + 2893))]
+  nflow.serv.intake <- copy(nflow.hhld.intake)[, `:=` (source="serv", value=value * 689 / 2893)]
+  
+  nflow.serv.intake <- calcresshares(nflow.o = nflow.serv.intake, nsour = "serv", foodres = foodres)
+  nflow.hhld.intake <- calcresshares(nflow.o = nflow.hhld.intake, nsour = "hhld", foodres = foodres)
+  nflow.intk <- rbind(nflow.tot.intake, nflow.hhld.intake, nflow.serv.intake)
+  
+  return(nflow.intk)
+}
+
+scens <- data.table(expand.grid(foodres.ambs, unique(allintakes$reden), unique(allintakes$redpr), unique(allintakes$ds)))
+names(scens) <- c("resamb", "reden", "redpr", "ds")
+allnflowintk <- Reduce(rbind, lapply(1:nrow(scens), function(x){
+  
+  r <- scens$resamb[x]; y <- scens$reden[x]; z <- scens$redpr[x]; w <- scens$ds[x]
+  cur.nflowintk <- fci_calctotintake(fci_intk = allintakes[reden==y & redpr==z & ds==w], 
+                                     fci_fressh = foodres.scenarios[amb==r, .(source, destination, share)] )
+  cur.nflowintk$resamb <- r; cur.nflowintk$reden <- y; 
+  cur.nflowintk$redpr <- z; cur.nflowintk$ds <- w
+  return(cur.nflowintk)
+  
+}))
+
+save(allintakeshares, allintakes, allnflowintk, file=rdfis)
+file.copy(rdfis, gsub(".rdata", "_nflowintk.rdata", rdfisc))
+
+nflow.intk <- allnflowintk[resamb=="Baseline" & reden==0 & redpr==0 & ds==0]
+nflow.intk[source=="tot"][]
+nflow.intk[source=="hhld"][]
+nflow.intk[source=="serv"][]
+
+```
+
+```{r f_prevstages, echo=TRUE, eval=TRUE}
+fcs_calcsankey <- function(fcs.int=nflow.intk, fcs.fressh=foodres.scenarios[amb=="Baseline"]){
+  
+  previousstage <- function(nflow.o, osour, nsour, sumold, calcres=TRUE){
+    
+    # Calculate flows at previous stages
+    
+    #osour <- "dist"
+    #nsour <- "proc"
+    #sumold <- c("hhld", "serv")
+    
+    nflow.4 <- copy(nflow.o)
+    nflow.4a <- nflow.4[source %in% osour & destination %in% c(sumold, "totres")]
+    nflow.4a <- nflow.4a[, value:=sum(value, na.rm=TRUE), by=.(of, versus, source)]
+    nflow.4a <- nflow.4a[destination %in% sumold[1], .(of, versus, level, source=nsour, destination=source, value, share=NA)]
+    
+    # Calculate flows of food residues (total and details)
+    if(calcres){
+      nflow.4e <- calcresshares(nflow.o = nflow.4a, nsour = nsour, foodres = fcs.fressh)
+    }else{
+      nflow.4e <- nflow.4a[order(level, of)]
+    }
+    return(nflow.4e)
+  }
+ 
+  fci_int <- copy(fcs.int)
+   
+  nflow.dist <- previousstage(nflow.o = fci_int, osour = c("hhld", "serv"), nsour = "dist", sumold = "intake")
+  nflow.proc <- previousstage(nflow.dist, osour = "dist", nsour = "proc", sumold = c("hhld", "serv"))
+  nflow.supp <- previousstage(nflow.proc, osour = "proc", nsour = "supp", sumold = "dist", calcres = FALSE)
+  
+  nsankey <- rbind(fci_int, nflow.dist, nflow.proc, nflow.supp)
+  return(nsankey)
+  
+}
+
+nscens <- unique(allnflowintk[, .(resamb, reden, redpr, ds)])
+allsankeys <- Reduce(rbind, lapply(1:nrow(nscens), function(x){
+  
+  r <- nscens$resamb[x]; y <- nscens$reden[x]; z <- nscens$redpr[x]; w <- nscens$ds[x]
+  cur.nsank <- fcs_calcsankey(fcs.int = allnflowintk[resamb == r & reden==y & redpr==z & ds==w, 1:7],
+                              fcs.fressh = foodres.scenarios[amb==r, .(source, destination, share)]) 
+  cur.nsank$resamb <- r; cur.nsank$reden <- y; 
+  cur.nsank$redpr <- z; cur.nsank$ds <- w
+  return(cur.nsank)
+  
+}))
+
+save(allintakeshares, allintakes, allnflowintk, allsankeys, file=rdfis)
+file.copy(rdfis, gsub(".rdata", "_sankey.rdata", rdfisc))
+
+nsankey <- allsankeys[resamb=="Baseline" & reden==0 & redpr==0 & ds==0]
+nsankey[source=='dist']
+nsankey[source=='proc']
+nsankey[source=='supp']
+
+```
+
+```{r calcnue, eval=TRUE, echo=TRUE}
+
+nuesystem <- function(nsankey = nsankey, 
+                      foodres.shares=foodres.scenarios[amb=="Baseline"], 
+                      input.regshares=input.regshares,
+                      input.NUEsup=input.NUEsup,
+                      farmambition='1base'){
+  #Use fertilizers from residues as verginN
+  #recyclN.1 <- rbind(nflow.hhld.intake, nflow.serv.intake, nflow.dist, nflow.proc)
+  recyclN.1 <- copy(nsankey)
+  cursankey <- copy(nsankey)
+  recyclN.1 <- recyclN.1[, 1:7]
+  cursankey <- cursankey[, 1:7]
+  recyclN.1 <- recyclN.1[destination %in% c("fert", "comp") | grepl("wwt", destination), 
+                         .(of, source, destination, value)]
+  
+  # Attach conversion from wwt --> sludge
+  recyclN.2 <- merge(recyclN.1, 
+                     foodres.shares[grepl("wwt", source), 
+                                    .(destination=source, sludgeshare=share)], by="destination", all.x = TRUE)
+  recyclN.2[! is.na(sludgeshare), `:=` (destination = "slud", value = value * sludgeshare)]
+  
+  # Attach conversion of sludge and comost --> fertilizer
+  recyclN.3 <- merge(recyclN.2, 
+                     foodres.shares[source %in% c("slud", "comp"), 
+                                    .(destination=source, applshare=share)], by="destination", all.x = TRUE)
+  recyclN.3[! is.na(applshare), `:=` (destination = 'fert', value = value * applshare)]
+  
+  # Calculate total that goes to agriculture
+  recyclN <- recyclN.3[, .(recyclN = sum(value)), by=.(of)]
+  
+  
+  # Get shares of supply by region
+  nue.supply <- merge(cursankey[source=="supp"], input.regshares, by.x="of", by.y="system", allow.cartesian = TRUE)
+  nue.supply <- merge(nue.supply, recyclN, by=c("of"))
+  nue.supply <- merge(nue.supply, cursankey[source=="tot", .(of, intakeN=value)], by=c("of"))[intakeN>0]
+  nue.supply[, `:=` (value = value * regshare/100, 
+                     recyclN = recyclN * regshare/100, 
+                     intakeN = intakeN * regshare/100)]
+  
+  
+  # Get NUEs
+  nue.supply <- merge(nue.supply, input.NUEsup, by.x=c("of", "region"), by.y=c("system", "region"))
+  
+  # Select ambition level
+  nue.total <- nue.supply[ambition %in% c(as.character(farmambition), "all"), 
+                          .(of, region, level, ambition, farmgateN=value, regshare, recyclN, intakeN, NUEsupply)] 
+  nue.total[, ambition := as.character(farmambition)]
+  # Calculate virgin N needed
+  nue.total[, virginN := farmgateN/NUEsupply]
+  
+  # Sytem NUE considers recycling 
+  nue.total[, `:=` (Nlosstot = virginN - recyclN - intakeN, NUEsys = intakeN/(virginN-recyclN))]
+  return(nue.total)
+  
+}
+
+farmamb <- c("1base", "2low", "3med", "4high")
+
+nuescens <- data.table(expand.grid(farmamb, foodres.ambs, unique(allsankeys$reden), unique(allsankeys$redpr), unique(allsankeys$ds)))
+names(nuescens) <- c("farmamb", "resamb", "reden", "redpr", "ds")
+allnues <- Reduce(rbind, lapply(1:nrow(nuescens), function(x){
+  
+  f <- nuescens$farmamb[x]; r <- nuescens$resamb[x]; 
+  y <- nuescens$reden[x]; z <- nuescens$redpr[x]; w <- nuescens$ds[x]
+  cur.nues <- nuesystem(nsankey = allsankeys[resamb == r & reden==y & redpr==z & ds==w],
+                        foodres.shares = foodres.scenarios[amb==r],
+                        input.regshares =  input.regshares, 
+                        input.NUEsup = input.NUEsup, farmambition = f) 
+  cur.nues$farmamb <- f; cur.nues$resamb <- r; cur.nues$reden <- y; 
+  cur.nues$redpr <- z; cur.nues$ds <- w
+  return(cur.nues)
+  
+}))
+
+save(allintakeshares, allintakes, allnflowintk, allsankeys, allnues, file=rdfis)
+file.copy(rdfis, gsub(".rdata", "_nues.rdata", rdfisc))
+
+nue <- allnues[farmamb=="1base" & resamb=="Baseline" & reden==0 & redpr==0 & ds==0]
+nue <- allnues[resamb=="Baseline" & reden==0 & redpr==0 & ds==0]
+nue
+
+
+```
+
+
+```{r nuesystot, echo=TRUE, eval=TRUE}
+
+## Filter out some runs to keep it manageable
+## 
+## 
+# Assume that dietary shift is next 'stage' of vegetarian diet
+allnues.sel <- allnues
+
+# Little effect on reduced energy intake on NUE, therefore test is only for default redpr and ds
+allnues.sel <- allnues.sel[
+  # normal case: reden==1 - but not if both others are zero or both at least 2
+  (reden/redensteps==1 & (redpr != 0 | ds != 0) & (! redpr/redprsteps > 1 | ! ds > 1)) |
+    # exception: if both are zero than, reden == 0
+    (reden==0 & redpr==0 & ds==0) |
+    # excepton: both are at least 2 then reden==2
+    (reden/redensteps==2 & redpr/redprsteps > 1 & ds > 1)]
+
+# Replace dietary shift codes with names
+allsankeys <- merge(allsankeys, dscodes, by="ds")[, -"ds", with=FALSE]
+setnames(allsankeys, "desc", "diet")
+allnues.sel <- merge(allnues.sel, dscodes, by="ds")[, -"ds", with=FALSE]
+setnames(allnues.sel, "desc", "diet")
+
+ 
+nuesysttot <- function(nuetot){
+  
+  nuefood <- nuetot[, lapply(.SD, sum, na.rm=TRUE), 
+                    .SDcols = c("virginN", "recyclN", "intakeN", "farmgateN", "Nlosstot"), 
+                    by=.(farmamb, resamb, reden, redpr, diet)]
+  nuefood[, `:=` (NUEsupply = farmgateN/virginN, NUEsys=intakeN/(virginN-recyclN))]
+  
+  return(nuefood)
+  
+}
+
+getintk <- function(nuetot){
+  nint <- nuetot [farmamb=="1base" & resamb=="Baseline", lapply(.SD, sum, na.rm=TRUE), 
+                    .SDcols = c("virginN", "recyclN", "intakeN", "farmgateN", "Nlosstot"), 
+                    by=.(reden, redpr, ds, of)]
+  nint <- dcast.data.table(nint, reden + redpr + ds ~ of, value.var = "intakeN")
+}
+
+nuefood <- nuesysttot(nuetot = allnues.sel)
+allnues.sel
+nuefood
+
+basloss <- nuefood[farmamb=="1base" & resamb=="Baseline" & reden==0 & redpr==0 & diet=="Default"]$Nlosstot
+nuefood[, nlossred := 1-Nlosstot/basloss]
+nloss <- dcast.data.table(nuefood, farmamb + resamb ~ reden+redpr+diet, value.var = "Nlosstot")
+nuesy <- dcast.data.table(nuefood, farmamb + resamb ~ reden+redpr+diet, value.var = "NUEsys")
+intkn <- dcast.data.table(nuefood, farmamb + resamb ~ reden+redpr+diet, value.var = "intakeN")
+nlossred <- dcast.data.table(nuefood, farmamb + resamb ~ reden+redpr+diet, value.var = "nlossred")
+
+```
+ 
+**Total system-wide nitrogen losses in the food system for different scenarios**
+The losses include emissions of reactive N (to the atmosphere and hydrosphere), 
+as well as molecular nitrogen and nitrogen dispersed (e.g. in landfills).
+Nitrogen losses are not differentiated by the geogrphic location where the losses occur, i.e. losses associated with imported feed/food are included as well. 
+
+`r nloss`
+
+**Total system-wide NUE for different scenarios**
+`r nuesy`
+
+**Total N intake for different scenarios**
+`r intkn`
+
+**Reduction of total system nitrogen losses for different scenarios**
+`r nlossred`
+
+
+```{r writeexcel, echo=FALSE, eval=TRUE}
+
+wb <- createWorkbook(creator = "Adrian Leip", title = "EPNF-Nflowmodel", subject = "Output data")
+ws <- addWorksheet(wb, sheetName = "N-sankey")
+wd <- writeData(wb, sheet = "N-sankey", allsankeys, colNames = TRUE, borders = "all")
+ws <- addWorksheet(wb, sheetName = "Scenarios")
+wd <- writeData(wb, sheet = "Scenarios", allnues.sel, borders = "all")
+ws <- addWorksheet(wb, sheetName = "EU_scenarios")
+wd <- writeData(wb, sheet = "EU_scenarios", nuefood, borders = "all")
+wbs <- saveWorkbook(wb, file=paste0(fol.res, "EPNF-Nflowmodel", today(), ".xlsx"), overwrite = TRUE)
+
+```
+
